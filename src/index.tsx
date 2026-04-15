@@ -47,7 +47,11 @@ const getStatus     = callable<[], { success: boolean; is_mobile: boolean; error
 //   3. afterPatch(ne, 'type') — inject 'Switch to Mobile' into the Fragment
 // ------------------------------------------------------------------
 
-type WpRequire = ((id: string) => any) & { m: Record<string, (...a: any[]) => any> };
+// req.c is the webpack module cache: Record<id, { exports: any }>
+type WpRequire = ((id: string) => any) & {
+  m: Record<string, (...a: any[]) => any>;
+  c: Record<string, { exports: any }>;
+};
 
 function getWpRequire(): WpRequire | null {
   let req: WpRequire | null = null;
@@ -58,18 +62,20 @@ function getWpRequire(): WpRequire | null {
 }
 
 // Find the module that exports showContextMenu, identified by unique content strings.
-// Returns { mod: exports object, key: property name } so we can patch the property.
-function findShowContextMenuExport(req: WpRequire): { mod: any; key: string } | null {
+// Returns { id, mod, key } — id needed to access the module cache entry.
+function findShowContextMenuExport(req: WpRequire): { id: string; mod: any; key: string } | null {
   for (const id of Object.keys(req.m)) {
     try {
       const src = req.m[id].toString();
       if (!src.includes('CreateContextMenuInstance') || !src.includes('GetContextMenuManagerFromWindow')) continue;
       const mod = req(id);
       for (const key of Object.keys(mod)) {
-        const fn = mod[key];
-        if (typeof fn === 'function' && fn.toString().includes('CreateContextMenuInstance')) {
-          return { mod, key };
-        }
+        try {
+          const fn = mod[key];
+          if (typeof fn === 'function' && fn.toString().includes('CreateContextMenuInstance')) {
+            return { id, mod, key };
+          }
+        } catch { /* getter may throw */ }
       }
     } catch { /* skip broken modules */ }
   }
@@ -133,6 +139,11 @@ function injectMobileButton(ret: any): any {
 }
 
 // Set up the Power Menu patch. Returns a cleanup function.
+//
+// lX (showContextMenu) is exported with configurable:false — cannot use defineProperty.
+// Instead, replace the entire module cache entry (req.c[id].exports) with a Proxy.
+// The Proxy intercepts reads of 'lX' and returns a wrapper that captures 'ne' on the
+// first Power Menu call, then restores the original exports and applies afterPatch.
 function patchPowerMenu(): () => void {
   const req = getWpRequire();
   if (!req) {
@@ -146,33 +157,77 @@ function patchPowerMenu(): () => void {
     return () => {};
   }
 
-  const { mod, key } = showCM;
-  const orig = mod[key] as (...args: any[]) => any;
+  const { id, mod: origExports, key } = showCM;
+  console.log("[MobileMode] found showCM id:", id, "key:", key,
+    "req.c type:", typeof (req as any).c,
+    "cacheEntry:", (req as any).c?.[id]);
+
   let neUnpatch: (() => void) | null = null;
   let interceptDone = false;
 
-  // Step 1: intercept showContextMenu to capture 'ne'
-  mod[key] = function (...args: any[]) {
-    if (!interceptDone && isPowerMenuElement(args[0])) {
-      interceptDone = true;
-      mod[key] = orig; // restore immediately
+  const makeWrapper = (origFn: (...args: any[]) => any, onCapture: () => void) =>
+    function (this: unknown, ...args: any[]) {
+      if (!interceptDone && isPowerMenuElement(args[0])) {
+        interceptDone = true;
+        onCapture();
+        const ne = args[0].type; // React.memo(fn)
+        neUnpatch = afterPatch(ne as Record<string, unknown>, "type", (_args: any[], ret: any) =>
+          injectMobileButton(ret)
+        ) as unknown as () => void;
+        console.log("[MobileMode] Power Menu patched ✓");
+      }
+      return origFn.apply(this, args);
+    };
 
-      const ne = args[0].type; // React.memo component
+  // Strategy 1: Proxy via module cache (req.c)
+  const cacheEntry = req.c?.[id];
+  if (cacheEntry) {
+    const origFn = origExports[key] as (...args: any[]) => any;
+    const proxied = new Proxy(origExports, {
+      get(target: any, prop: string) {
+        if (prop === key && !interceptDone) {
+          return makeWrapper(origFn, () => { cacheEntry.exports = origExports; });
+        }
+        return target[prop];
+      },
+    });
+    cacheEntry.exports = proxied;
+    console.log("[MobileMode] Using Proxy strategy");
+    return () => {
+      if (!interceptDone) cacheEntry.exports = origExports;
+      neUnpatch?.();
+      console.log("[MobileMode] Power Menu patch removed");
+    };
+  }
 
-      // Step 2: patch ne.type to inject our button on every render
-      neUnpatch = afterPatch(ne as Record<string, unknown>, "type", (_args: any[], ret: any) =>
-        injectMobileButton(ret)
-      ) as unknown as () => void;
+  // Strategy 2: Object.defineProperty (fallback when req.c unavailable)
+  console.log("[MobileMode] req.c not accessible, trying defineProperty");
+  const origFn = origExports[key] as (...args: any[]) => any;
+  if (typeof origFn !== "function") {
+    console.warn("[MobileMode] showContextMenu[key] is not a function — patch skipped");
+    return () => {};
+  }
 
-      console.log("[MobileMode] Power Menu patched ✓");
-    }
-    return orig.apply(this, args);
-  };
+  const wrapper = makeWrapper(origFn, () => {
+    try {
+      Object.defineProperty(origExports, key, { value: origFn, writable: true, configurable: true, enumerable: true });
+    } catch { /* best-effort restore */ }
+  });
 
-  // Cleanup: restore showContextMenu intercept if never triggered,
-  // and remove the ne.type patch
+  try {
+    Object.defineProperty(origExports, key, { get: () => wrapper, configurable: true, enumerable: true });
+    console.log("[MobileMode] Using defineProperty strategy");
+  } catch (e) {
+    console.warn("[MobileMode] defineProperty also failed:", e, "— patch skipped");
+    return () => {};
+  }
+
   return () => {
-    if (!interceptDone) mod[key] = orig;
+    if (!interceptDone) {
+      try {
+        Object.defineProperty(origExports, key, { value: origFn, writable: true, configurable: true, enumerable: true });
+      } catch { /* best-effort */ }
+    }
     neUnpatch?.();
     console.log("[MobileMode] Power Menu patch removed");
   };

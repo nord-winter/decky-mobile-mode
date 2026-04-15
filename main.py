@@ -25,10 +25,6 @@ class Plugin:
         """Install session files and switch to Mobile Mode."""
         try:
             self._install_session_files()
-            subprocess.run(
-                ["steamosctl", "set-default-desktop-session", "mobile.desktop"],
-                check=True,
-            )
             self._write_state("mobile")
             subprocess.run(["steamosctl", "switch-to-desktop-mode"], check=True)
             decky.logger.info("Mobile Mode: switched to mobile session")
@@ -125,8 +121,14 @@ class Plugin:
         dst = os.path.join(APPS_DIR, "return-to-gaming.desktop")
         shutil.copy(src, dst)
 
-        # Wayland session descriptor (requires root — Decky backend runs as root)
-        shutil.copy(os.path.join(ASSETS_DIR, "mobile.desktop"), MOBILE_DESKTOP)
+        # mobile.desktop goes to /usr/share/wayland-sessions/ which is read-only on SteamOS.
+        # Install it once manually via SSH:
+        #   sudo cp <plugin>/assets/mobile.desktop /usr/share/wayland-sessions/
+        if not os.path.exists(MOBILE_DESKTOP):
+            decky.logger.warning(
+                "Mobile Mode: mobile.desktop not found at "
+                f"{MOBILE_DESKTOP} — install manually via SSH"
+            )
 
         decky.logger.info("Mobile Mode: session files installed")
 
