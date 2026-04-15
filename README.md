@@ -1,99 +1,177 @@
-# Decky Plugin Template [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
+<div align="center">
 
-Reference example for using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) in a [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin.
+<img src="assets/logo.png" width="96" alt="Mobile Mode logo" />
 
-### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates. currently documentation is split between this README and the wiki which is something we are hoping to rectify in the future.**  
+# Mobile Mode
 
-## Developers
+**A third operating mode for your Steam Deck — touch-first, vertical, fully Linux.**
 
-### Dependencies
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0-informational)](plugin.json)
+[![Platform](https://img.shields.io/badge/platform-SteamOS%203.8-brightgreen)](https://store.steampowered.com/steamos)
+[![Decky Loader](https://img.shields.io/badge/Decky%20Loader-required-orange)](https://github.com/SteamDeckHomebrew/decky-loader)
 
-This template relies on the user having Node.js v16.14+ and `pnpm` (v9) installed on their system.  
-Please make sure to install pnpm v9 to prevent issues with CI during plugin submission.  
-`pnpm` can be downloaded from `npm` itself which is recommended.
+<a href="https://buymeacoffee.com/nord.winter">
+  <img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-☕-yellow?style=for-the-badge" alt="Buy Me a Coffee" />
+</a>
 
-#### Linux
+</div>
+
+---
+
+## What is Mobile Mode?
+
+Steam Deck has two built-in modes: **Gaming** and **Desktop**. Mobile Mode adds a third.
+
+One tap in the Power Menu switches your Deck into a **portrait-oriented, touch-first KDE session** — no extra packages, no Plasma Mobile, no hacks. Everything needed is already in SteamOS 3.8.
+
+| Gaming Mode | Desktop Mode | **Mobile Mode** |
+|-------------|--------------|----------------|
+| Gamescope, controller | KDE landscape | **KDE portrait · touch · Maliit keyboard** |
+| Games | Linux apps (mouse) | **Linux apps (finger)** |
+| Steam UI | Full desktop | **Vertical · thumb-friendly** |
+
+### What you get
+
+- Portrait screen orientation (90° rotation via `kscreen-doctor`)
+- Maliit virtual keyboard — auto-invokes on every text input
+- Full Linux app access: browser, Telegram, media player, files
+- "Switch to Mobile" button natively in the Steam Power Menu
+- "Return to Gaming" one-tap button inside the KDE session
+- Persistent across SteamOS updates (files reinstalled on every plugin load)
+
+---
+
+## Installation
+
+> **Requires [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)**
+
+### From Decky Store *(coming soon)*
+
+Search for **"Mobile Mode"** in the Decky plugin store.
+
+### Manual install
+
+1. Download the latest release `.zip` from [Releases](https://github.com/nord-winter/decky-mobile-mode/releases)
+2. In Decky → Settings → **Install plugin from zip**
+
+---
+
+## How it works
+
+```
+Power Menu → "Switch to Mobile"
+  └─ Decky backend (root) installs session files
+  └─ steamosctl switches to mobile.desktop
+  └─ KDE starts via plasma-dbus-run-session-if-needed
+  └─ autostart: kscreen-doctor rotates screen · maliit-server starts
+  └─ KDE in portrait mode ✓
+
+KDE → "Return to Gaming"
+  └─ kscreen-doctor restores landscape
+  └─ steamosctl switch-to-game-mode
+```
+
+No extra packages required — `KWin`, `maliit-keyboard`, `kscreen-doctor` and `steamosctl` are all pre-installed in SteamOS 3.8.
+
+---
+
+## Architecture
+
+```
+decky-mobile-mode/
+├── src/index.tsx              # Frontend: Power Menu patch · QAM panel
+├── main.py                    # Backend (root): steamosctl · file management
+└── assets/
+    ├── mobile.desktop         # Wayland session descriptor
+    ├── startplasma-mobile.sh  # KDE session launcher (Maliit env)
+    ├── mobile-mode-init.sh    # Autostart: rotation + maliit-server
+    ├── return-to-gaming.sh    # Switch back to Gaming Mode
+    └── return-to-gaming.desktop
+```
+
+### Power Menu patch
+
+The "Switch to Mobile" button is injected into Steam's Power Menu at runtime. The approach is update-resistant — no hardcoded webpack module IDs, components are identified by stable content strings:
+
+| Target | Identified by |
+|--------|--------------|
+| `showContextMenu` | `CreateContextMenuInstance` + `GetContextMenuManagerFromWindow` |
+| Power Menu component | render source contains `ShutdownPC` + `IN_GAMESCOPE` |
+
+Research conducted via CEF DevTools on SteamOS 3.8.2 (Steam build Apr 11 2026). Full technical notes in [`.claude/CLAUDE.md`](.claude/CLAUDE.md).
+
+---
+
+## Development
+
+### Requirements
+
+- Node.js ≥ 16.14
+- pnpm v9+ (`npm i -g pnpm@9`)
+- Steam Deck or SteamOS VM for testing
+
+### Build
 
 ```bash
-sudo npm i -g pnpm@9
+pnpm i
+pnpm run build    # → dist/index.js
+pnpm run watch    # watch mode
 ```
 
-If you would like to build plugins that have their own custom backends, Docker is required as it is used by the Decky CLI tool.
-
-### Making your own plugin
-
-1. You can fork this repo or utilize the "Use this template" button on Github.
-2. In your local fork/own plugin-repository run these commands:
-   1. ``pnpm i``
-   2. ``pnpm run build``
-   - These setup pnpm and build the frontend code for testing.
-3. Consult the [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) repository for ways to accomplish your tasks.
-   - Documentation and examples are still rough, 
-   - Decky loader primarily targets Steam Deck hardware so keep this in mind when developing your plugin.
-4. If using VSCodium/VSCode, run the `setup` and `build` and `deploy` tasks. If not using VSCodium etc. you can derive your own makefile or just manually utilize the scripts for these commands as you see fit.
-
-If you use VSCode or it's derivatives (we suggest [VSCodium](https://vscodium.com/)!) just run the `setup` and `build` tasks. It's really that simple.
-
-#### Other important information
-
-Everytime you change the frontend code (`index.tsx` etc) you will need to rebuild using the commands from step 2 above or the build task if you're using vscode or a derivative.
-
-Note: If you are receiving build errors due to an out of date library, you should run this command inside of your repository:
+### Deploy to device
 
 ```bash
-pnpm update @decky/ui --latest
+# Configure your device IP
+echo 'DECK_IP=192.168.1.x' >> .vscode/config.sh
+
+# Deploy via VSCode task or:
+ssh deck@<IP> "..."
 ```
 
-### Backend support
+### Debug
 
-If you are developing with a backend for a plugin and would like to submit it to the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) you will need to have all backend code located in ``backend/src``, with backend being located in the root of your git repository.
-When building your plugin, the source code will be built and any finished binary or binaries will be output to ``backend/out`` (which is created during CI.)
-If your buildscript, makefile or any other build method does not place the binary files in the ``backend/out`` directory they will not be properly picked up during CI and your plugin will not have the required binaries included for distribution.
+```bash
+# Session log on device
+cat ~/.config/mobile-mode/session.log
 
-Example:  
-In our makefile used to demonstrate the CI process of building and distributing a plugin backend, note that the makefile explicitly creates the `out` folder (``backend/out``) and then compiles the binary into that folder. Here's the relevant snippet.
+# Decky plugin logs
+ssh deck@<IP> "journalctl -u plugin_loader -f"
 
-```make
-hello:
-	mkdir -p ./out
-	gcc -o ./out/hello ./src/main.c
+# CEF DevTools (Power Menu research)
+ssh -L 8080:localhost:8080 deck@<IP> -N
+# → http://localhost:8080 → SharedJSContext
 ```
 
-The CI does create the `out` folder itself but we recommend creating it yourself if possible during your build process to ensure the build process goes smoothly.
+---
 
-Note: When locally building your plugin it will be placed into a folder called 'out' this is different from the concept described above.
+## Roadmap
 
-The out folder is not sent to the final plugin, but is then put into a ``bin`` folder which is found at the root of the plugin's directory.  
-More information on the bin folder can be found below in the distribution section below.
+- [x] Phase 0 — Research (steamosctl, Maliit, kscreen-doctor verified)
+- [x] Phase 1 — MVP shell scripts (tested on device)
+- [ ] Phase 2 — Decky plugin *(current)*
+  - [x] Power Menu patch — "Switch to Mobile"
+  - [x] Python backend
+  - [x] Return to Gaming
+  - [x] QAM mode indicator
+  - [ ] On-device testing
+- [ ] Phase 3 — UX polish (KWin rules, smooth transitions, gestures)
+- [ ] Phase 4 — Decky Store submission
 
-### Distribution
+---
 
-We recommend following the instructions found in the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) on how to get your plugin up on the plugin store. This is the best way to get your plugin in front of users.
-You can also choose to do distribution via a zip file containing the needed files, if that zip file is uploaded to a URL it can then be downloaded and installed via decky-loader.
+## Support
 
-Layout of a plugin zip ready for distribution:
-```
-pluginname-v1.0.0.zip (version number is optional but recommended for users sake)
-   |
-   pluginname/ <directory>
-   |  |  |
-   |  |  bin/ <directory> (optional)
-   |  |     |
-   |  |     binary (optional)
-   |  |
-   |  dist/ <directory> [required]
-   |      |
-   |      index.js [required]
-   | 
-   package.json [required]
-   plugin.json [required]
-   main.py {required if you are using the python backend of decky-loader: serverAPI}
-   README.md (optional but recommended)
-   LICENSE(.md) [required, filename should be roughly similar, suffix not needed]
-```
+If Mobile Mode saves you from squinting at landscape apps — consider buying me a coffee ☕
 
-Note regarding licenses: Including a license is required for the plugin store if your chosen license requires the license to be included alongside usage of source-code/binaries!
+<a href="https://buymeacoffee.com/nord.winter">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="50" alt="Buy Me a Coffee" />
+</a>
 
-Standard procedure for licenses is to have your chosen license at the top of the file, and to leave the original license for the plugin-template at the bottom. If this is not the case on submission to the plugin database, you will be asked to fix this discrepancy.
+---
 
-We cannot and will not distribute your plugin on the Plugin Store if it's license requires it's inclusion but you have not included a license to be re-distributed with your plugin in the root of your git repository.
+## License
+
+GPL-3.0-or-later © 2026 [nord-winter](https://github.com/nord-winter)
+
+Plugin template originally by [Steam Deck Homebrew](https://github.com/SteamDeckHomebrew/decky-plugin-template) — BSD-3-Clause.

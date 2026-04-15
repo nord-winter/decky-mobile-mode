@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Mobile Mode
+Comment=Touch-optimized vertical KDE session for Steam Deck
+Exec=/home/deck/.config/mobile-mode/startplasma-mobile.sh
+DesktopNames=KDE
+Type=Application

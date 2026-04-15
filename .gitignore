@@ -49,6 +49,9 @@ backend/out
 # Make sure to ignore any instance of the loader's decky_plugin.py
 decky_plugin.py
 
+# Local Claude instructions (personal/machine-specific)
+.claude/CLAUDE.local.md
+
 # Ignore decky CLI for building plugins
 out
 out/*

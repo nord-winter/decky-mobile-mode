@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Return to Gaming
+Comment=Switch back to Steam Gaming Mode
+Exec=/home/deck/.config/mobile-mode/return-to-gaming.sh
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Game;
