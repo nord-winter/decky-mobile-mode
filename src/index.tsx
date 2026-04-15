@@ -21,36 +21,11 @@ const disableMobile = callable<[], { success: boolean; error?: string }>("disabl
 const getStatus     = callable<[], { success: boolean; is_mobile: boolean; error?: string }>("get_status");
 
 // ------------------------------------------------------------------
-// Power Menu patch
-//
-// Research (CEF DevTools, SteamOS 3.8.2, Steam build Apr 11 2026):
-//
-//   showContextMenu — module 31084, export 'lX'
-//     Identified by: 'CreateContextMenuInstance' + 'GetContextMenuManagerFromWindow'
-//     Verified unique: only one module matches → update-resistant
-//
-//   Power Menu component 'ne' — module 38258, NOT exported (closure variable)
-//     d4 calls: T.lX(jsx(ne, {onCancel}), browserWindow, {onCancel})
-//     ne = React.memo(fn), ne.type.writable = true → afterPatch works
-//     Identified by: element.type.type.toString() contains 'ShutdownPC' + 'IN_GAMESCOPE'
-//     Verified unique: only one module matches → update-resistant
-//
-//   "Switch to Desktop" button in ne's render:
-//     Last child of Power Menu children array — a Fragment containing:
-//       <Separator />
-//       <MenuItem feature={16} tone="destructive">Switch to Desktop</MenuItem>
-//     Only rendered when P = IN_GAMESCOPE && !kiosk && !lockScreen && ...
-//
-// Strategy (no hardcoded module IDs):
-//   1. Find showContextMenu via content search
-//   2. Intercept it — on first Power Menu call capture 'ne', restore immediately
-//   3. afterPatch(ne, 'type') — inject 'Switch to Mobile' into the Fragment
+// Webpack helpers
 // ------------------------------------------------------------------
 
-// req.c is the webpack module cache: Record<id, { exports: any }>
 type WpRequire = ((id: string) => any) & {
   m: Record<string, (...a: any[]) => any>;
-  c: Record<string, { exports: any }>;
 };
 
 function getWpRequire(): WpRequire | null {
@@ -61,43 +36,40 @@ function getWpRequire(): WpRequire | null {
   return req;
 }
 
-// Find the module that exports showContextMenu, identified by unique content strings.
-// Returns { id, mod, key } — id needed to access the module cache entry.
-function findShowContextMenuExport(req: WpRequire): { id: string; mod: any; key: string } | null {
+// Find the session-switching API (module 90389, export Bd in Steam Apr-2026 build).
+// Identified by content: module exports an object with a SwitchToDesktop method.
+// Same API the native "Switch to Desktop" button calls — update-resistant.
+function findSessionSwitcher(): { SwitchToDesktop: (opts: object) => void } | null {
+  const req = getWpRequire();
+  if (!req) return null;
   for (const id of Object.keys(req.m)) {
     try {
-      const src = req.m[id].toString();
-      if (!src.includes('CreateContextMenuInstance') || !src.includes('GetContextMenuManagerFromWindow')) continue;
+      if (!req.m[id].toString().includes("SwitchToDesktop")) continue;
       const mod = req(id);
-      for (const key of Object.keys(mod)) {
-        try {
-          const fn = mod[key];
-          if (typeof fn === 'function' && fn.toString().includes('CreateContextMenuInstance')) {
-            return { id, mod, key };
-          }
-        } catch { /* getter may throw */ }
+      for (const key of Object.keys(mod || {})) {
+        if (typeof mod[key]?.SwitchToDesktop === "function") {
+          console.log(`[MobileMode] SwitchToDesktop: module ${id} export ${key}`);
+          return mod[key];
+        }
       }
-    } catch { /* skip broken modules */ }
+    } catch { /* skip */ }
   }
+  console.warn("[MobileMode] SwitchToDesktop not found");
   return null;
 }
 
-// True when element is the Power Menu React element (ne wrapped in jsx).
-// Uses content strings that are stable across Steam updates.
-function isPowerMenuElement(element: any): boolean {
-  try {
-    const src: string =
-      element?.type?.type?.toString?.() ??
-      element?.type?.toString?.() ??
-      "";
-    return src.includes("ShutdownPC") && src.includes("IN_GAMESCOPE");
-  } catch { return false; }
-}
+// ------------------------------------------------------------------
+// Power Menu patch
+//
+// Power Menu component 'ne' (module 38258, Steam Apr-2026) is not exported.
+// We capture it by wrapping React.createElement and jsx/jsxs and checking
+// each element type for the 'ShutdownPC' + 'IN_GAMESCOPE' fingerprint.
+// On first match: restore the originals, apply afterPatch(ne, 'type').
+//
+// ne.type is plain writable → afterPatch works.
+// Identification is content-based → update-resistant (no hardcoded module IDs).
+// ------------------------------------------------------------------
 
-// Inject "Switch to Mobile" button into the rendered Power Menu JSX tree.
-// The tree structure: <Dialog><children[]></Dialog>
-// The last child (when visible) is a Fragment: [<Separator/>, <MenuItem feature=16>Switch to Desktop</MenuItem>]
-// We add our button into that same Fragment.
 function injectMobileButton(ret: any): any {
   try {
     const children: any[] = ret?.props?.children;
@@ -107,7 +79,7 @@ function injectMobileButton(ret: any): any {
       const fragChildren: any[] = child?.props?.children;
       if (!Array.isArray(fragChildren)) continue;
 
-      // Find the Switch to Desktop button (feature=16, tone="destructive")
+      // "Switch to Desktop" button: feature=16, tone="destructive"
       const switchBtn = fragChildren.find(
         (c: any) => c?.props?.feature === 16 && c?.props?.tone === "destructive"
       );
@@ -116,14 +88,22 @@ function injectMobileButton(ret: any): any {
       // Guard against double-injection on re-renders
       if (fragChildren.some((c: any) => c?.key === "mobile-mode-btn")) return ret;
 
-      // Clone the Switch to Desktop button with our props
       const mobileBtn = {
         ...switchBtn,
         key: "mobile-mode-btn",
         props: {
           ...switchBtn.props,
           onSelected: async () => {
-            try { await enableMobile(); } catch (e) { console.error("[MobileMode]", e); }
+            try {
+              const result = await enableMobile();
+              if (result.success) {
+                _sessionSwitcher?.SwitchToDesktop({});
+              } else {
+                console.error("[MobileMode] enable failed:", result.error);
+              }
+            } catch (e) {
+              console.error("[MobileMode]", e);
+            }
           },
           children: "Switch to Mobile",
         },
@@ -133,101 +113,104 @@ function injectMobileButton(ret: any): any {
       return ret;
     }
   } catch (e) {
-    console.error("[MobileMode] injectMobileButton error:", e);
+    console.error("[MobileMode] injectMobileButton:", e);
   }
   return ret;
 }
 
-// Set up the Power Menu patch. Returns a cleanup function.
-//
-// lX (showContextMenu) is exported with configurable:false — cannot use defineProperty.
-// Instead, replace the entire module cache entry (req.c[id].exports) with a Proxy.
-// The Proxy intercepts reads of 'lX' and returns a wrapper that captures 'ne' on the
-// first Power Menu call, then restores the original exports and applies afterPatch.
 function patchPowerMenu(): () => void {
   const req = getWpRequire();
   if (!req) {
-    console.warn("[MobileMode] webpackChunksteamui not available — Power Menu patch skipped");
+    console.warn("[MobileMode] webpackChunksteamui not available");
     return () => {};
   }
-
-  const showCM = findShowContextMenuExport(req);
-  if (!showCM) {
-    console.warn("[MobileMode] showContextMenu not found — Power Menu patch skipped");
-    return () => {};
-  }
-
-  const { id, mod: origExports, key } = showCM;
-  console.log("[MobileMode] found showCM id:", id, "key:", key,
-    "req.c type:", typeof (req as any).c,
-    "cacheEntry:", (req as any).c?.[id]);
 
   let neUnpatch: (() => void) | null = null;
   let interceptDone = false;
 
-  const makeWrapper = (origFn: (...args: any[]) => any, onCapture: () => void) =>
-    function (this: unknown, ...args: any[]) {
-      if (!interceptDone && isPowerMenuElement(args[0])) {
-        interceptDone = true;
-        onCapture();
-        const ne = args[0].type; // React.memo(fn)
-        neUnpatch = afterPatch(ne as Record<string, unknown>, "type", (_args: any[], ret: any) =>
-          injectMobileButton(ret)
-        ) as unknown as () => void;
-        console.log("[MobileMode] Power Menu patched ✓");
-      }
-      return origFn.apply(this, args);
-    };
+  const captureNe = (ne: any) => {
+    if (interceptDone) return;
+    interceptDone = true;
+    restore();
+    neUnpatch = afterPatch(
+      ne as Record<string, unknown>,
+      "type",
+      (_args: any[], ret: any) => injectMobileButton(ret)
+    ) as unknown as () => void;
+    console.log("[MobileMode] Power Menu patched ✓");
+  };
 
-  // Strategy 1: Proxy via module cache (req.c)
-  const cacheEntry = req.c?.[id];
-  if (cacheEntry) {
-    const origFn = origExports[key] as (...args: any[]) => any;
-    const proxied = new Proxy(origExports, {
-      get(target: any, prop: string) {
-        if (prop === key && !interceptDone) {
-          return makeWrapper(origFn, () => { cacheEntry.exports = origExports; });
-        }
-        return target[prop];
-      },
-    });
-    cacheEntry.exports = proxied;
-    console.log("[MobileMode] Using Proxy strategy");
-    return () => {
-      if (!interceptDone) cacheEntry.exports = origExports;
-      neUnpatch?.();
-      console.log("[MobileMode] Power Menu patch removed");
-    };
-  }
-
-  // Strategy 2: Object.defineProperty (fallback when req.c unavailable)
-  console.log("[MobileMode] req.c not accessible, trying defineProperty");
-  const origFn = origExports[key] as (...args: any[]) => any;
-  if (typeof origFn !== "function") {
-    console.warn("[MobileMode] showContextMenu[key] is not a function — patch skipped");
-    return () => {};
-  }
-
-  const wrapper = makeWrapper(origFn, () => {
+  const check = (type: any) => {
     try {
-      Object.defineProperty(origExports, key, { value: origFn, writable: true, configurable: true, enumerable: true });
-    } catch { /* best-effort restore */ }
-  });
+      const src: string = type?.type?.toString?.() ?? "";
+      if (src.includes("ShutdownPC") && src.includes("IN_GAMESCOPE")) captureNe(type);
+    } catch { /* ignore */ }
+  };
 
-  try {
-    Object.defineProperty(origExports, key, { get: () => wrapper, configurable: true, enumerable: true });
-    console.log("[MobileMode] Using defineProperty strategy");
-  } catch (e) {
-    console.warn("[MobileMode] defineProperty also failed:", e, "— patch skipped");
+  // Strategy A: react/jsx-runtime (new JSX transform)
+  let jsxMod: any = null;
+  let origJsx: any, origJsxs: any;
+  for (const id of Object.keys(req.m)) {
+    try {
+      const m = req(id);
+      if (typeof m?.jsx === "function" && typeof m?.jsxs === "function" && m?.Fragment) {
+        jsxMod = m;
+        console.log("[MobileMode] jsx-runtime:", id);
+        break;
+      }
+    } catch { /* skip */ }
+  }
+  if (jsxMod) {
+    origJsx  = jsxMod.jsx;
+    origJsxs = jsxMod.jsxs;
+    const wrap = (orig: (...a: any[]) => any) =>
+      function (this: unknown, type: any, ...rest: any[]): any {
+        if (!interceptDone) check(type);
+        return orig.call(this, type, ...rest);
+      };
+    try { jsxMod.jsx = wrap(origJsx); jsxMod.jsxs = wrap(origJsxs); }
+    catch (e) { console.warn("[MobileMode] jsx-runtime wrap failed:", e); }
+  }
+
+  // Strategy B: React.createElement (old JSX transform — used by Power Menu)
+  let reactMod: any = null;
+  let origCreate: any;
+  for (const id of Object.keys(req.m)) {
+    try {
+      const m = req(id);
+      if (typeof m?.createElement === "function" &&
+          typeof m?.memo === "function" &&
+          typeof m?.useState === "function") {
+        reactMod = m;
+        console.log("[MobileMode] React:", id);
+        break;
+      }
+    } catch { /* skip */ }
+  }
+  if (reactMod) {
+    origCreate = reactMod.createElement;
+    try {
+      reactMod.createElement = function (this: unknown, type: any, ...rest: any[]): any {
+        if (!interceptDone) check(type);
+        return origCreate.call(this, type, ...rest);
+      };
+    } catch (e) { console.warn("[MobileMode] createElement wrap failed:", e); }
+  }
+
+  if (!jsxMod && !reactMod) {
+    console.warn("[MobileMode] neither jsx-runtime nor React found");
     return () => {};
   }
+
+  console.log("[MobileMode] interceptors active — open Power Menu once to complete patch");
+
+  const restore = () => {
+    if (jsxMod)   { try { jsxMod.jsx = origJsx; jsxMod.jsxs = origJsxs; } catch { /**/ } }
+    if (reactMod) { try { reactMod.createElement = origCreate; } catch { /**/ } }
+  };
 
   return () => {
-    if (!interceptDone) {
-      try {
-        Object.defineProperty(origExports, key, { value: origFn, writable: true, configurable: true, enumerable: true });
-      } catch { /* best-effort */ }
-    }
+    if (!interceptDone) restore();
     neUnpatch?.();
     console.log("[MobileMode] Power Menu patch removed");
   };
@@ -256,8 +239,17 @@ function Content() {
     setSwitching(true);
     setError(null);
     try {
-      const result = isMobile ? await disableMobile() : await enableMobile();
-      if (!result.success) setError(result.error ?? "Unknown error");
+      if (isMobile) {
+        const result = await disableMobile();
+        if (!result.success) setError(result.error ?? "Unknown error");
+      } else {
+        const result = await enableMobile();
+        if (result.success) {
+          _sessionSwitcher?.SwitchToDesktop({});
+        } else {
+          setError(result.error ?? "Unknown error");
+        }
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -301,9 +293,7 @@ function Content() {
 
       {error && (
         <PanelSectionRow>
-          <div style={{ color: "#ff6b6b", fontSize: "0.85em" }}>
-            Error: {error}
-          </div>
+          <div style={{ color: "#ff6b6b", fontSize: "0.85em" }}>Error: {error}</div>
         </PanelSectionRow>
       )}
 
@@ -323,10 +313,12 @@ function Content() {
 // ------------------------------------------------------------------
 
 let _unpatch: (() => void) | null = null;
+let _sessionSwitcher: { SwitchToDesktop: (opts: object) => void } | null = null;
 
 export default definePlugin(() => {
   console.log("[MobileMode] Plugin initialising");
   _unpatch = patchPowerMenu();
+  _sessionSwitcher = findSessionSwitcher();
 
   return {
     name: "Mobile Mode",
@@ -337,6 +329,7 @@ export default definePlugin(() => {
       console.log("[MobileMode] Plugin dismounting");
       _unpatch?.();
       _unpatch = null;
+      _sessionSwitcher = null;
     },
   };
 });

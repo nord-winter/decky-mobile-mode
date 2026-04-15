@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Mobile Mode Init
+Comment=Apply portrait rotation and start Maliit keyboard
+Exec=/home/deck/.config/mobile-mode/mobile-mode-init.sh
+Type=Application
+X-KDE-autostart-phase=2
+NoDisplay=true

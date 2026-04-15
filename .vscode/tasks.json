@@ -146,5 +146,25 @@
             "command": "ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo '${config:deckpass}' | sudo -S systemctl restart plugin_loader'",
             "problemMatcher": []
         },
+        {
+            "label": "installsessionfile",
+            "detail": "One-time: install mobile.desktop to /usr/local/share/wayland-sessions/ via sudo",
+            "type": "shell",
+            "group": "none",
+            "command": "ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo ${config:deckpass} | sudo -S mkdir -p /usr/local/share/wayland-sessions && echo ${config:deckpass} | sudo -S cp ${config:deckdir}/homebrew/plugins/decky-mobile-mode/assets/mobile.desktop /usr/local/share/wayland-sessions/mobile.desktop && echo ${config:deckpass} | sudo -S chmod 644 /usr/local/share/wayland-sessions/mobile.desktop && echo OK'",
+            "problemMatcher": []
+        },
+        {
+            "label": "deployandinstall",
+            "detail": "Build, deploy plugin and install session file",
+            "dependsOrder": "sequence",
+            "group": "none",
+            "dependsOn": [
+                "builddeploy",
+                "installsessionfile",
+                "restartdecky"
+            ],
+            "problemMatcher": []
+        },
     ]
 }

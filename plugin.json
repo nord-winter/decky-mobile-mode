@@ -2,7 +2,7 @@
   "name": "Mobile Mode",
   "author": "nord-winter",
   "version": "0.1.0",
-  "flags": ["_root"],
+  "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["mobile", "kde", "session", "touch"],

@@ -12,5 +12,18 @@ echo "=== Mobile Mode start: $(date) ===" >> "$LOG"
 export QT_IM_MODULE=maliit
 export MALIIT_SERVER_ARGUMENTS="--overridePlatformPlugins maliit"
 
+# Tell KWin to use Maliit as the Wayland input method.
+# Without this KWin ignores the running maliit-server.
+KWINRC="$HOME/.config/kwinrc"
+if ! grep -q "^\[Wayland\]" "$KWINRC" 2>/dev/null; then
+    echo "" >> "$KWINRC"
+    echo "[Wayland]" >> "$KWINRC"
+fi
+# Remove any existing InputMethod line and write fresh
+grep -v "^InputMethod=" "$KWINRC" > "${KWINRC}.tmp" && mv "${KWINRC}.tmp" "$KWINRC"
+# Insert InputMethod after [Wayland] header
+sed -i '/^\[Wayland\]/a InputMethod=/usr/share/applications/com.github.maliit.keyboard.desktop' "$KWINRC"
+echo "kwinrc: Maliit InputMethod set" >> "$LOG"
+
 echo "Starting KDE Wayland session..." >> "$LOG"
 exec /usr/lib/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland
