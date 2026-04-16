@@ -50,6 +50,8 @@ class Plugin:
         """Switch back to Gaming Mode."""
         try:
             self._clear_state()
+            self._restore_kwinrc()
+            self._set_default_session("plasma.desktop")
             self._switch_to_game()
             decky.logger.info("Mobile Mode: returned to gaming mode")
             return {"success": True}
@@ -71,6 +73,7 @@ class Plugin:
     async def _main(self):
         decky.logger.info(f"Mobile Mode loaded (uid={os.getuid()})")
         self._install_session_files()
+        self._clear_state()  # Gaming Mode start — ensure no stale mobile state
 
     async def _unload(self):
         decky.logger.info("Mobile Mode unloaded")
@@ -151,7 +154,7 @@ class Plugin:
         result = subprocess.run(
             ["steamosctl", "switch-to-game-mode"], env=env, capture_output=True
         )
-        if result.returncode not in (0, -13):
+        if result.returncode not in (0, 1, -13):
             raise subprocess.CalledProcessError(result.returncode, "steamosctl switch-to-game-mode")
         decky.logger.info(f"Mobile Mode: switch-to-game-mode rc={result.returncode} ✓")
 
@@ -197,6 +200,24 @@ class Plugin:
                 pass
         shutil.rmtree(MOBILE_CFG, ignore_errors=True)
         decky.logger.info("Mobile Mode: session files removed")
+
+    def _restore_kwinrc(self):
+        """Remove the InputMethod line we wrote to kwinrc during mobile session."""
+        kwinrc = os.path.join(decky.DECKY_USER_HOME, ".config", "kwinrc")
+        if not os.path.exists(kwinrc):
+            return
+        try:
+            with open(kwinrc) as f:
+                lines = f.readlines()
+            cleaned = [l for l in lines if not l.strip().startswith("InputMethod=")]
+            with open(kwinrc, "w") as f:
+                f.writelines(cleaned)
+            deck_uid = os.stat(decky.DECKY_USER_HOME).st_uid
+            deck_gid = os.stat(decky.DECKY_USER_HOME).st_gid
+            os.chown(kwinrc, deck_uid, deck_gid)
+            decky.logger.info("Mobile Mode: kwinrc restored")
+        except Exception as e:
+            decky.logger.warning(f"Mobile Mode: kwinrc restore failed — {e}")
 
     def _write_state(self, state: str):
         os.makedirs(MOBILE_CFG, exist_ok=True)

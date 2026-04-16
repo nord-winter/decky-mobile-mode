@@ -133,8 +133,15 @@ let req; webpackChunksteamui.push([[Symbol()],{},r=>{req=r}]);
 
 | Target | Strings |
 |--------|---------|
-| Power Menu component `ne` | `element.type.type.toString()` contains `'ShutdownPC'` + `'IN_GAMESCOPE'` |
+| Power Menu component `ne` | `element.type.type.toString()` contains `'isKioskModeLocked'` + `'IsLockScreenActive'` — **ShutdownPC/IN_GAMESCOPE are in sibling closures (gL, bl), NOT in ne.type** |
 | `SwitchToDesktop` API | module exports object with `SwitchToDesktop` method |
+
+### Power Menu capture — corrected facts (Apr 2026)
+
+- `d4` (export from module 38258) calls `(0,i.jsx)(ne, ...)` — **jsx-runtime, not createElement**
+- `ne.type.toString()` contains: `isKioskModeLocked`, `IsLockScreenActive`, `IsMainGamepadUIWindow`, `IsGamepadUIWindowActive`, `"Streaming"` — use these as fingerprint
+- `ShutdownPC` is in `gL` (sibling export), `IN_GAMESCOPE` is in `bl` (sibling export) — NOT in `ne.type`
+- `findSessionSwitcher()` must use `req.c` (cached modules only) — executing uncached modules via `req(id)` causes SwitchToDesktop side effects in some Steam modules
 
 ### injectMobileButton
 

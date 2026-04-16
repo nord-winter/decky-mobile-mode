@@ -4,6 +4,15 @@
 # Applies screen rotation and starts Maliit keyboard daemon.
 
 LOG="$HOME/.config/mobile-mode/session.log"
+
+# Guard: only run in Mobile Mode sessions.
+# This file lives in ~/.config/autostart/ and would run in any KDE session.
+# Exit early if the backend hasn't set the active_mode flag.
+if [ "$(cat "$HOME/.config/mobile-mode/active_mode" 2>/dev/null)" != "mobile" ]; then
+    echo "Autostart: not in mobile mode, skipping at $(date)" >> "$LOG"
+    exit 0
+fi
+
 echo "Autostart: applying mobile settings at $(date)..." >> "$LOG"
 
 # Ensure Wayland env is set — some KDE autostart paths don't inherit all vars.

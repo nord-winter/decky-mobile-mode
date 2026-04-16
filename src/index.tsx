@@ -42,10 +42,11 @@ function getWpRequire(): WpRequire | null {
 function findSessionSwitcher(): { SwitchToDesktop: (opts: object) => void } | null {
   const req = getWpRequire();
   if (!req) return null;
-  for (const id of Object.keys(req.m)) {
+  // Search cached modules first — safe, no side effects.
+  const cache: Record<string, { exports: any }> = (req as any).c ?? {};
+  for (const id of Object.keys(cache)) {
     try {
-      if (!req.m[id].toString().includes("SwitchToDesktop")) continue;
-      const mod = req(id);
+      const mod = cache[id]?.exports;
       for (const key of Object.keys(mod || {})) {
         if (typeof mod[key]?.SwitchToDesktop === "function") {
           console.log(`[MobileMode] SwitchToDesktop: module ${id} export ${key}`);
@@ -54,6 +55,16 @@ function findSessionSwitcher(): { SwitchToDesktop: (opts: object) => void } | nu
       }
     } catch { /* skip */ }
   }
+  // Fallback: load module 90389 explicitly — known safe (just exports the API, no side effects).
+  try {
+    const mod = req("90389");
+    for (const key of Object.keys(mod || {})) {
+      if (typeof mod[key]?.SwitchToDesktop === "function") {
+        console.log(`[MobileMode] SwitchToDesktop: module 90389 export ${key} (explicit load)`);
+        return mod[key];
+      }
+    }
+  } catch { /* skip */ }
   console.warn("[MobileMode] SwitchToDesktop not found");
   return null;
 }
@@ -120,18 +131,16 @@ function injectMobileButton(ret: any): any {
 
 function patchPowerMenu(): () => void {
   const req = getWpRequire();
-  if (!req) {
-    console.warn("[MobileMode] webpackChunksteamui not available");
-    return () => {};
-  }
 
   let neUnpatch: (() => void) | null = null;
   let interceptDone = false;
+  let domObserver: MutationObserver | null = null;
 
   const captureNe = (ne: any) => {
     if (interceptDone) return;
     interceptDone = true;
-    restore();
+    domObserver?.disconnect(); domObserver = null;
+    restoreJsx();
     neUnpatch = afterPatch(
       ne as Record<string, unknown>,
       "type",
@@ -140,77 +149,96 @@ function patchPowerMenu(): () => void {
     console.log("[MobileMode] Power Menu patched ✓");
   };
 
-  const check = (type: any) => {
+  // Fingerprint: ne.type contains these strings (verified Apr-2026 Steam build).
+  const isNe = (type: any): boolean => {
     try {
       const src: string = type?.type?.toString?.() ?? "";
-      if (src.includes("ShutdownPC") && src.includes("IN_GAMESCOPE")) captureNe(type);
-    } catch { /* ignore */ }
+      return src.includes("isKioskModeLocked") && src.includes("IsLockScreenActive");
+    } catch { return false; }
   };
 
-  // Strategy A: react/jsx-runtime (new JSX transform)
+  // Strategy A (PRIMARY): DOM MutationObserver + React fiber ancestry walk.
+  //
+  // When the Power Menu context menu is rendered, React attaches a fiber key
+  // (__reactFiber$...) to each DOM element. We observe any DOM additions,
+  // get the fiber from the element, and walk UP via fiber.return until we
+  // find the ne component (identified by its function body fingerprint).
+  //
+  // Update-resistant: no webpack module IDs, no jsx import pattern assumptions,
+  // no DevTools hook requirement — works in production.
+  const scanElement = (el: Element): boolean => {
+    const fiberKey = Object.keys(el).find(k => k.startsWith("__reactFiber"));
+    if (!fiberKey) return false;
+    let fiber = (el as any)[fiberKey];
+    while (fiber) {
+      if (isNe(fiber.type)) { captureNe(fiber.type); return true; }
+      fiber = fiber.return;
+    }
+    return false;
+  };
+
+  const scanSubtree = (root: Element): void => {
+    if (interceptDone) return;
+    if (scanElement(root)) return;
+    for (const child of Array.from(root.querySelectorAll("*"))) {
+      if (interceptDone) return;
+      if (scanElement(child as Element)) return;
+    }
+  };
+
+  domObserver = new MutationObserver((mutations) => {
+    if (interceptDone) { domObserver?.disconnect(); return; }
+    for (const mutation of mutations) {
+      for (const node of Array.from(mutation.addedNodes)) {
+        if (interceptDone) return;
+        if (node instanceof Element) scanSubtree(node);
+      }
+    }
+  });
+  // subtree: true — context menus may be portaled into nested containers, not directly into body.
+  domObserver.observe(document.body, { childList: true, subtree: true });
+  console.log("[MobileMode] DOM observer active");
+
+  // Strategy B (BACKUP): jsx-runtime wrapping (cached modules only — avoids side effects).
+  // Catches jsx(ne, ...) if the DOM observer misses for any reason.
   let jsxMod: any = null;
   let origJsx: any, origJsxs: any;
-  for (const id of Object.keys(req.m)) {
-    try {
-      const m = req(id);
-      if (typeof m?.jsx === "function" && typeof m?.jsxs === "function" && m?.Fragment) {
-        jsxMod = m;
-        console.log("[MobileMode] jsx-runtime:", id);
-        break;
-      }
-    } catch { /* skip */ }
+  if (req) {
+    const cache: Record<string, { exports: any }> = (req as any).c ?? {};
+    for (const id of Object.keys(cache)) {
+      try {
+        const m = cache[id]?.exports;
+        // jsx-runtime exports jsx + jsxs; Fragment may or may not be present.
+        if (typeof m?.jsx === "function" && typeof m?.jsxs === "function" && !m?.createElement) {
+          jsxMod = m;
+          console.log("[MobileMode] jsx-runtime: module", id);
+          break;
+        }
+      } catch { /* skip */ }
+    }
+    if (!jsxMod) console.warn("[MobileMode] jsx-runtime not found in cache — DOM observer only");
   }
+
+  const restoreJsx = () => {
+    if (jsxMod) { try { jsxMod.jsx = origJsx; jsxMod.jsxs = origJsxs; } catch { /**/ } }
+  };
+
   if (jsxMod) {
-    origJsx  = jsxMod.jsx;
-    origJsxs = jsxMod.jsxs;
+    origJsx = jsxMod.jsx; origJsxs = jsxMod.jsxs;
     const wrap = (orig: (...a: any[]) => any) =>
       function (this: unknown, type: any, ...rest: any[]): any {
-        if (!interceptDone) check(type);
+        if (!interceptDone && isNe(type)) captureNe(type);
         return orig.call(this, type, ...rest);
       };
     try { jsxMod.jsx = wrap(origJsx); jsxMod.jsxs = wrap(origJsxs); }
     catch (e) { console.warn("[MobileMode] jsx-runtime wrap failed:", e); }
   }
 
-  // Strategy B: React.createElement (old JSX transform — used by Power Menu)
-  let reactMod: any = null;
-  let origCreate: any;
-  for (const id of Object.keys(req.m)) {
-    try {
-      const m = req(id);
-      if (typeof m?.createElement === "function" &&
-          typeof m?.memo === "function" &&
-          typeof m?.useState === "function") {
-        reactMod = m;
-        console.log("[MobileMode] React:", id);
-        break;
-      }
-    } catch { /* skip */ }
-  }
-  if (reactMod) {
-    origCreate = reactMod.createElement;
-    try {
-      reactMod.createElement = function (this: unknown, type: any, ...rest: any[]): any {
-        if (!interceptDone) check(type);
-        return origCreate.call(this, type, ...rest);
-      };
-    } catch (e) { console.warn("[MobileMode] createElement wrap failed:", e); }
-  }
-
-  if (!jsxMod && !reactMod) {
-    console.warn("[MobileMode] neither jsx-runtime nor React found");
-    return () => {};
-  }
-
   console.log("[MobileMode] interceptors active — open Power Menu once to complete patch");
 
-  const restore = () => {
-    if (jsxMod)   { try { jsxMod.jsx = origJsx; jsxMod.jsxs = origJsxs; } catch { /**/ } }
-    if (reactMod) { try { reactMod.createElement = origCreate; } catch { /**/ } }
-  };
-
   return () => {
-    if (!interceptDone) restore();
+    domObserver?.disconnect(); domObserver = null;
+    restoreJsx();
     neUnpatch?.();
     console.log("[MobileMode] Power Menu patch removed");
   };
@@ -279,7 +307,7 @@ function Content() {
           }
           checked={isMobile}
           onChange={handleToggle}
-          disabled={switching}
+          disabled={loading || switching}
         />
       </PanelSectionRow>
 
