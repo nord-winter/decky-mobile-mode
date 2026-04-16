@@ -38,14 +38,21 @@ done
 kscreen-doctor output.eDP-1.rotation.none >> "$LOG" 2>&1
 echo "kscreen-doctor rotation exit=$?" >> "$LOG"
 
-# Give kscreen a moment to apply the rotation
+# Scale 1.5× — logical resolution becomes ~533×853.
+# Makes touch targets reachable and UI legible in portrait.
+# This change is transient (kscreen-doctor does not write to ~/.local/share/kscreen/),
+# so it self-reverts when the KDE session ends — no cleanup needed.
+kscreen-doctor output.eDP-1.scale.1.5 >> "$LOG" 2>&1
+echo "kscreen-doctor scale exit=$?" >> "$LOG"
+
+# Give kscreen a moment to apply rotation + scale
 sleep 1
 
-# Force KWin to recalculate geometry after rotation
+# Force KWin to recalculate geometry after rotation and scale
 qdbus org.kde.KWin /KWin reconfigure >> "$LOG" 2>&1
 echo "qdbus reconfigure exit=$?" >> "$LOG"
 
-echo "Screen rotated to portrait" >> "$LOG"
+echo "Screen: portrait 800×1280 @ 1.5× scale (logical 533×853)" >> "$LOG"
 
 # Start Maliit virtual keyboard daemon
 /usr/lib/maliit-server &

@@ -20,6 +20,11 @@ LOCAL_MOBILE_DESKTOP = os.path.join(LOCAL_SESSIONS_DIR, "mobile.desktop")
 
 MODE_STATE_FILE = os.path.join(MOBILE_CFG, "active_mode")
 
+# systemd-sysext paths
+SYSEXT_EXTENSIONS_DIR = "/var/lib/extensions"
+SYSEXT_RAW = os.path.join(SYSEXT_EXTENSIONS_DIR, "plasma-mobile.raw")
+MOBILESHELL_DIR = "/usr/share/plasma/shells/org.kde.plasma.mobileshell"
+
 # Explicit PATH — Decky's systemd unit has a restricted PATH.
 _SYS_ENV = dict(os.environ, PATH="/usr/bin:/usr/local/bin:/bin:/usr/sbin:/sbin")
 
@@ -30,15 +35,32 @@ class Plugin:
     # Public API
     # ------------------------------------------------------------------
 
+    async def check_install_status(self) -> dict:
+        """Return sysext installation and activation status."""
+        try:
+            is_installed = os.path.exists(SYSEXT_RAW)
+            is_active = os.path.isdir(MOBILESHELL_DIR)
+            return {"success": True, "is_installed": is_installed, "is_active": is_active}
+        except Exception as e:
+            decky.logger.error(f"Mobile Mode: check_install_status failed — {e}")
+            return {"success": False, "is_installed": False, "is_active": False, "error": str(e)}
+
     async def enable_mobile(self) -> dict:
-        """Install session files and set the default session to mobile.desktop.
+        """Merge plasma-mobile sysext, install session files, and set default session.
 
         The frontend calls SwitchToDesktop() via the Steam webpack API after this
         returns — the same path the native 'Switch to Desktop' button uses.
         """
         try:
+            # Install files BEFORE sysext merge: after merge /usr/ becomes overlayfs
+            # and the bind-mount at /usr/local/ is hidden (read-only).
             self._install_session_files()
+            self._set_mobile_shell_config()
             self._set_default_session("mobile.desktop")
+            if os.path.exists(SYSEXT_RAW):
+                self._sysext_merge()
+            else:
+                decky.logger.warning("Mobile Mode: plasma-mobile.raw not found — shell may fall back to desktop")
             self._write_state("mobile")
             decky.logger.info("Mobile Mode: ready — frontend will switch session")
             return {"success": True}
@@ -51,6 +73,7 @@ class Plugin:
         try:
             self._clear_state()
             self._restore_kwinrc()
+            self._restore_plasmashellrc()
             self._set_default_session("plasma.desktop")
             self._switch_to_game()
             decky.logger.info("Mobile Mode: returned to gaming mode")
@@ -72,8 +95,18 @@ class Plugin:
 
     async def _main(self):
         decky.logger.info(f"Mobile Mode loaded (uid={os.getuid()})")
+        # Unmerge sysext first: while merged, /usr/ is overlayfs and the
+        # bind-mount at /usr/local/ is hidden (read-only). Unmerge restores
+        # writability so _install_session_files() can write mobile.desktop.
+        self._sysext_unmerge()
+        # Normalize state on every Gaming Mode start.
+        # Handles the case where user returned via KDE "Return to Gaming" button
+        # (which bypasses disable_mobile) — cleans kwinrc and resets default session.
+        self._restore_kwinrc()
+        self._restore_plasmashellrc()
+        self._set_default_session("plasma.desktop")
         self._install_session_files()
-        self._clear_state()  # Gaming Mode start — ensure no stale mobile state
+        self._clear_state()
 
     async def _unload(self):
         decky.logger.info("Mobile Mode unloaded")
@@ -159,6 +192,47 @@ class Plugin:
         decky.logger.info(f"Mobile Mode: switch-to-game-mode rc={result.returncode} ✓")
 
     # ------------------------------------------------------------------
+    # systemd-sysext helpers
+    # ------------------------------------------------------------------
+
+    def _sysext_env(self) -> dict:
+        """Clean env for systemd-sysext — strips Decky/PyInstaller library paths.
+
+        Decky bundles Python via PyInstaller which sets LD_LIBRARY_PATH to its
+        temp dir. systemd-sysext then loads the wrong libcrypto.so.3 and crashes.
+        """
+        env = dict(_SYS_ENV)
+        env.pop("LD_LIBRARY_PATH", None)
+        env.pop("LD_PRELOAD", None)
+        return env
+
+    def _sysext_merge(self):
+        """Merge /var/lib/extensions into /usr (idempotent)."""
+        result = subprocess.run(
+            ["systemd-sysext", "merge"],
+            env=self._sysext_env(), capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            decky.logger.info("Mobile Mode: sysext merged ✓")
+        elif "already merged" in result.stderr.lower():
+            decky.logger.info("Mobile Mode: sysext already merged")
+        else:
+            raise RuntimeError(f"systemd-sysext merge failed (rc={result.returncode}): {result.stderr.strip()}")
+
+    def _sysext_unmerge(self):
+        """Unmerge sysext extensions from /usr (idempotent, ignores 'not merged')."""
+        result = subprocess.run(
+            ["systemd-sysext", "unmerge"],
+            env=self._sysext_env(), capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            decky.logger.info("Mobile Mode: sysext unmerged ✓")
+        elif "not merged" in result.stderr.lower():
+            decky.logger.info("Mobile Mode: sysext was not merged")
+        else:
+            decky.logger.warning(f"Mobile Mode: sysext unmerge rc={result.returncode}: {result.stderr.strip()}")
+
+    # ------------------------------------------------------------------
     # File management
     # ------------------------------------------------------------------
 
@@ -218,6 +292,48 @@ class Plugin:
             decky.logger.info("Mobile Mode: kwinrc restored")
         except Exception as e:
             decky.logger.warning(f"Mobile Mode: kwinrc restore failed — {e}")
+
+    def _set_mobile_shell_config(self):
+        """Write plasmashellrc to use the mobile shell package.
+
+        Done from Python (not from startplasma-mobile.sh) to guarantee the file
+        is written before the KDE session starts reading it.
+        """
+        plasmashellrc = os.path.join(decky.DECKY_USER_HOME, ".config", "plasmashellrc")
+        deck_uid = os.stat(decky.DECKY_USER_HOME).st_uid
+        deck_gid = os.stat(decky.DECKY_USER_HOME).st_gid
+        cfg = configparser.ConfigParser()
+        cfg.read(plasmashellrc)
+        if not cfg.has_section("General"):
+            cfg.add_section("General")
+        cfg.set("General", "ShellPackage", "org.kde.plasma.mobileshell")
+        with open(plasmashellrc, "w") as f:
+            cfg.write(f)
+        os.chown(plasmashellrc, deck_uid, deck_gid)
+        decky.logger.info("Mobile Mode: plasmashellrc → org.kde.plasma.mobileshell ✓")
+
+    def _restore_plasmashellrc(self):
+        """Reset ShellPackage in plasmashellrc to default (plasma-desktop).
+
+        startplasma-mobile.sh sets ShellPackage=org.kde.plasma.mobileshell.
+        We must restore it on Gaming Mode start so next Desktop Mode session
+        gets the normal plasma-desktop shell, not the mobile one.
+        """
+        plasmashellrc = os.path.join(decky.DECKY_USER_HOME, ".config", "plasmashellrc")
+        if not os.path.exists(plasmashellrc):
+            return
+        try:
+            subprocess.run(
+                ["kwriteconfig6", "--file", plasmashellrc,
+                 "--group", "General", "--key", "ShellPackage", "org.kde.plasma.desktoppackage"],
+                env=_SYS_ENV, check=True, capture_output=True,
+            )
+            deck_uid = os.stat(decky.DECKY_USER_HOME).st_uid
+            deck_gid = os.stat(decky.DECKY_USER_HOME).st_gid
+            os.chown(plasmashellrc, deck_uid, deck_gid)
+            decky.logger.info("Mobile Mode: plasmashellrc restored")
+        except Exception as e:
+            decky.logger.warning(f"Mobile Mode: plasmashellrc restore failed — {e}")
 
     def _write_state(self, state: str):
         os.makedirs(MOBILE_CFG, exist_ok=True)

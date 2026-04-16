@@ -224,6 +224,37 @@ Deploy to device — via VSCode tasks (`.vscode/tasks.json`) or manually via `cl
 - [ ] "Return to Gaming" button verified in KDE session
 - [ ] QAM panel toggle verified end-to-end
 
+## sysext integration — verified facts (Phase P4)
+
+### systemd-sysext called from Decky
+- Calling `systemd-sysext merge` from Decky subprocess crashes with OpenSSL mismatch:
+  Decky/PyInstaller sets `LD_LIBRARY_PATH=/tmp/_MEI.../` → systemd picks up the bundled `libcrypto.so.3` which has wrong version
+- Fix: `_sysext_env()` strips `LD_LIBRARY_PATH` and `LD_PRELOAD` before calling systemd-sysext
+
+### sysext overlay hides /usr/local/ bind-mount
+- After `systemd-sysext merge`, `/usr/` becomes a read-only overlayfs
+- The bind-mount at `/usr/local/` (backing: `/var/usrlocal/`) is hidden by the overlay → EROFS
+- Order in `enable_mobile()`: **install session files → set default session → sysext merge**
+- Order in `_main()` (Gaming Mode start): **sysext unmerge → restore kwinrc/plasmashellrc → set plasma.desktop → install files**
+
+### plasmashell shell selection
+- `~/.config/plasmashellrc` → `[General]` → `ShellPackage=org.kde.plasma.mobileshell` — correct mechanism
+- Must be written from Python via `configparser` in `enable_mobile()` (bash kwriteconfig6 in startplasma-mobile.sh is unreliable for ordering)
+- Restore in `_main()` and `disable_mobile()`: `ShellPackage=org.kde.plasma.desktoppackage`
+
+### Qt ABI compatibility — CRITICAL
+- Qt plugins are NOT loadable across minor versions — KCoreAddons performs a strict Qt version check
+- Building with Qt 6.11 → `.so` plugins fail to load on SteamOS Qt 6.9.1 with "uses incompatible Qt library. (6.11.0)"
+- SteamOS strips Qt6 cmake config files (`Qt6CoreToolsConfig.cmake` absent) → cannot run cmake on device
+- **Solution**: Docker build that downgrades Qt to 6.9.1 from Arch Linux archive (+ ICU 76.1 which Qt 6.9.1 links against)
+- Build pipeline: `sysext/Dockerfile` + `sysext/build.sh` (host script) + `sysext/build_inner.sh` (runs inside container)
+- plasma-mobile 6.4.3 minimum requirements: Qt ≥ 6.8.0, ECM/KF6 ≥ 6.14.0 (SteamOS satisfies both)
+
+### SteamOS devmode + pacman
+- `sudo steamos-devmode enable` — initialises pacman keyring, but does NOT remount `/usr/` rw
+- `sudo steamos-readonly disable` — reports "already read-write" if a sysext is merged (sysext overlay makes /usr read-only)
+- Correct order: **systemd-sysext unmerge → steamos-readonly disable → pacman -S**
+
 ## Known bugs fixed (Phase 2 debugging)
 
 | Bug | Root cause | Fix |

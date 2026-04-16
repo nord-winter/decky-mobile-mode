@@ -26,4 +26,12 @@ sed -i '/^\[Wayland\]/a InputMethod=/usr/share/applications/com.github.maliit.ke
 echo "kwinrc: Maliit InputMethod set" >> "$LOG"
 
 echo "Starting KDE Wayland session..." >> "$LOG"
+
+# Tell plasmashell to use the mobile shell package.
+# plasmashell reads ShellPackage from plasmashellrc on startup.
+# We write it here so normal Desktop Mode (plasma.desktop) is unaffected.
+PLASMASHELLRC="$HOME/.config/plasmashellrc"
+kwriteconfig6 --file "$PLASMASHELLRC" --group General --key ShellPackage org.kde.plasma.mobileshell
+echo "plasmashellrc: ShellPackage=org.kde.plasma.mobileshell" >> "$LOG"
+
 exec /usr/lib/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland

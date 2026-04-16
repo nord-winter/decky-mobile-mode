@@ -3,7 +3,6 @@ import {
   PanelSectionRow,
   ToggleField,
   staticClasses,
-  afterPatch,
 } from "@decky/ui";
 import {
   callable,
@@ -70,181 +69,6 @@ function findSessionSwitcher(): { SwitchToDesktop: (opts: object) => void } | nu
 }
 
 // ------------------------------------------------------------------
-// Power Menu patch
-//
-// Power Menu component 'ne' (module 38258, Steam Apr-2026) is not exported.
-// We capture it by wrapping React.createElement and jsx/jsxs and checking
-// each element type for the 'ShutdownPC' + 'IN_GAMESCOPE' fingerprint.
-// On first match: restore the originals, apply afterPatch(ne, 'type').
-//
-// ne.type is plain writable → afterPatch works.
-// Identification is content-based → update-resistant (no hardcoded module IDs).
-// ------------------------------------------------------------------
-
-function injectMobileButton(ret: any): any {
-  try {
-    const children: any[] = ret?.props?.children;
-    if (!Array.isArray(children)) return ret;
-
-    for (const child of children) {
-      const fragChildren: any[] = child?.props?.children;
-      if (!Array.isArray(fragChildren)) continue;
-
-      // "Switch to Desktop" button: feature=16, tone="destructive"
-      const switchBtn = fragChildren.find(
-        (c: any) => c?.props?.feature === 16 && c?.props?.tone === "destructive"
-      );
-      if (!switchBtn) continue;
-
-      // Guard against double-injection on re-renders
-      if (fragChildren.some((c: any) => c?.key === "mobile-mode-btn")) return ret;
-
-      const mobileBtn = {
-        ...switchBtn,
-        key: "mobile-mode-btn",
-        props: {
-          ...switchBtn.props,
-          onSelected: async () => {
-            try {
-              const result = await enableMobile();
-              if (result.success) {
-                _sessionSwitcher?.SwitchToDesktop({});
-              } else {
-                console.error("[MobileMode] enable failed:", result.error);
-              }
-            } catch (e) {
-              console.error("[MobileMode]", e);
-            }
-          },
-          children: "Switch to Mobile",
-        },
-      };
-
-      child.props.children = [...fragChildren, mobileBtn];
-      return ret;
-    }
-  } catch (e) {
-    console.error("[MobileMode] injectMobileButton:", e);
-  }
-  return ret;
-}
-
-function patchPowerMenu(): () => void {
-  const req = getWpRequire();
-
-  let neUnpatch: (() => void) | null = null;
-  let interceptDone = false;
-  let domObserver: MutationObserver | null = null;
-
-  const captureNe = (ne: any) => {
-    if (interceptDone) return;
-    interceptDone = true;
-    domObserver?.disconnect(); domObserver = null;
-    restoreJsx();
-    neUnpatch = afterPatch(
-      ne as Record<string, unknown>,
-      "type",
-      (_args: any[], ret: any) => injectMobileButton(ret)
-    ) as unknown as () => void;
-    console.log("[MobileMode] Power Menu patched ✓");
-  };
-
-  // Fingerprint: ne.type contains these strings (verified Apr-2026 Steam build).
-  const isNe = (type: any): boolean => {
-    try {
-      const src: string = type?.type?.toString?.() ?? "";
-      return src.includes("isKioskModeLocked") && src.includes("IsLockScreenActive");
-    } catch { return false; }
-  };
-
-  // Strategy A (PRIMARY): DOM MutationObserver + React fiber ancestry walk.
-  //
-  // When the Power Menu context menu is rendered, React attaches a fiber key
-  // (__reactFiber$...) to each DOM element. We observe any DOM additions,
-  // get the fiber from the element, and walk UP via fiber.return until we
-  // find the ne component (identified by its function body fingerprint).
-  //
-  // Update-resistant: no webpack module IDs, no jsx import pattern assumptions,
-  // no DevTools hook requirement — works in production.
-  const scanElement = (el: Element): boolean => {
-    const fiberKey = Object.keys(el).find(k => k.startsWith("__reactFiber"));
-    if (!fiberKey) return false;
-    let fiber = (el as any)[fiberKey];
-    while (fiber) {
-      if (isNe(fiber.type)) { captureNe(fiber.type); return true; }
-      fiber = fiber.return;
-    }
-    return false;
-  };
-
-  const scanSubtree = (root: Element): void => {
-    if (interceptDone) return;
-    if (scanElement(root)) return;
-    for (const child of Array.from(root.querySelectorAll("*"))) {
-      if (interceptDone) return;
-      if (scanElement(child as Element)) return;
-    }
-  };
-
-  domObserver = new MutationObserver((mutations) => {
-    if (interceptDone) { domObserver?.disconnect(); return; }
-    for (const mutation of mutations) {
-      for (const node of Array.from(mutation.addedNodes)) {
-        if (interceptDone) return;
-        if (node instanceof Element) scanSubtree(node);
-      }
-    }
-  });
-  // subtree: true — context menus may be portaled into nested containers, not directly into body.
-  domObserver.observe(document.body, { childList: true, subtree: true });
-  console.log("[MobileMode] DOM observer active");
-
-  // Strategy B (BACKUP): jsx-runtime wrapping (cached modules only — avoids side effects).
-  // Catches jsx(ne, ...) if the DOM observer misses for any reason.
-  let jsxMod: any = null;
-  let origJsx: any, origJsxs: any;
-  if (req) {
-    const cache: Record<string, { exports: any }> = (req as any).c ?? {};
-    for (const id of Object.keys(cache)) {
-      try {
-        const m = cache[id]?.exports;
-        // jsx-runtime exports jsx + jsxs; Fragment may or may not be present.
-        if (typeof m?.jsx === "function" && typeof m?.jsxs === "function" && !m?.createElement) {
-          jsxMod = m;
-          console.log("[MobileMode] jsx-runtime: module", id);
-          break;
-        }
-      } catch { /* skip */ }
-    }
-    if (!jsxMod) console.warn("[MobileMode] jsx-runtime not found in cache — DOM observer only");
-  }
-
-  const restoreJsx = () => {
-    if (jsxMod) { try { jsxMod.jsx = origJsx; jsxMod.jsxs = origJsxs; } catch { /**/ } }
-  };
-
-  if (jsxMod) {
-    origJsx = jsxMod.jsx; origJsxs = jsxMod.jsxs;
-    const wrap = (orig: (...a: any[]) => any) =>
-      function (this: unknown, type: any, ...rest: any[]): any {
-        if (!interceptDone && isNe(type)) captureNe(type);
-        return orig.call(this, type, ...rest);
-      };
-    try { jsxMod.jsx = wrap(origJsx); jsxMod.jsxs = wrap(origJsxs); }
-    catch (e) { console.warn("[MobileMode] jsx-runtime wrap failed:", e); }
-  }
-
-  console.log("[MobileMode] interceptors active — open Power Menu once to complete patch");
-
-  return () => {
-    domObserver?.disconnect(); domObserver = null;
-    restoreJsx();
-    neUnpatch?.();
-    console.log("[MobileMode] Power Menu patch removed");
-  };
-}
-
-// ------------------------------------------------------------------
 // QAM Panel
 // ------------------------------------------------------------------
 
@@ -299,11 +123,13 @@ function Content() {
     <PanelSection title="Mobile Mode">
       <PanelSectionRow>
         <ToggleField
-          label={isMobile ? "Mobile Mode active" : "Mobile Mode off"}
+          label={isMobile ? "Mobile Mode active" : "Switch to Mobile Mode"}
           description={
-            isMobile
-              ? "Running touch-optimised KDE session"
-              : "Switch to vertical, touch-first KDE session"
+            switching
+              ? (isMobile ? "Returning to Gaming Mode…" : "Closing Steam session…")
+              : (isMobile
+                  ? "Portrait · touch-first KDE session"
+                  : "Portrait orientation · Maliit keyboard · touch UI")
           }
           checked={isMobile}
           onChange={handleToggle}
@@ -311,27 +137,27 @@ function Content() {
         />
       </PanelSectionRow>
 
-      {switching && (
+      {!isMobile && !switching && (
         <PanelSectionRow>
-          <div style={{ textAlign: "center", opacity: 0.6 }}>
-            {isMobile ? "Returning to Gaming Mode…" : "Switching to Mobile Mode…"}
+          <div style={{ fontSize: "0.8em", opacity: 0.5, lineHeight: 1.4 }}>
+            Steam will close to switch sessions. Use "Return to Gaming" inside KDE to come back.
+          </div>
+        </PanelSectionRow>
+      )}
+
+      {isMobile && !switching && (
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.8em", opacity: 0.5, lineHeight: 1.4 }}>
+            Use "Return to Gaming" inside KDE to switch back.
           </div>
         </PanelSectionRow>
       )}
 
       {error && (
         <PanelSectionRow>
-          <div style={{ color: "#ff6b6b", fontSize: "0.85em" }}>Error: {error}</div>
+          <div style={{ color: "#ff6b6b", fontSize: "0.85em" }}>⚠ {error}</div>
         </PanelSectionRow>
       )}
-
-      <PanelSectionRow>
-        <div style={{ fontSize: "0.8em", opacity: 0.5, lineHeight: 1.4 }}>
-          {isMobile
-            ? "Use 'Return to Gaming' inside KDE to switch back."
-            : "Portrait orientation · Maliit keyboard · full Linux apps"}
-        </div>
-      </PanelSectionRow>
     </PanelSection>
   );
 }
@@ -340,12 +166,10 @@ function Content() {
 // Plugin entry point
 // ------------------------------------------------------------------
 
-let _unpatch: (() => void) | null = null;
 let _sessionSwitcher: { SwitchToDesktop: (opts: object) => void } | null = null;
 
 export default definePlugin(() => {
   console.log("[MobileMode] Plugin initialising");
-  _unpatch = patchPowerMenu();
   _sessionSwitcher = findSessionSwitcher();
 
   return {
@@ -355,8 +179,6 @@ export default definePlugin(() => {
     icon: <FaMobileAlt />,
     onDismount() {
       console.log("[MobileMode] Plugin dismounting");
-      _unpatch?.();
-      _unpatch = null;
       _sessionSwitcher = null;
     },
   };
